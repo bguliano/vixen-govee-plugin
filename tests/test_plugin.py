@@ -145,6 +145,18 @@ class Controller(unittest.TestCase):
         with self.assertRaises(vp.ConfigError):
             main.plugin._configure(c, settings([{"deviceId": LAMP}, {"deviceId": LAMP.lower()}]))
 
+    def test_new_settings_and_old_rows(self):
+        c = self.make(settings([{"deviceId": STRIP, "mode": "segmentsReversed", "segments": 3},
+                                {"deviceId": LAMP, "ip": "10.9.9.9", "haEntity": "light.x", "reverse": False}],
+                               fixedAddresses=[STRIP.lower() + " 10.0.0.66"]), 12)
+        strip, lamp = c.devices
+        self.assertEqual((strip.mode, strip.reverse, strip.segments, strip.configured_ip), ("segments", True, 3, "10.0.0.66"))
+        self.assertEqual((lamp.configured_ip, lamp.entity), ("10.9.9.9", "light.x"), "0.1.0 rows still work")
+        bad = main.GoveeController(main.plugin, "inst-3", main.plugin._types[0][0], 3)
+        with self.assertRaises(vp.ConfigError) as caught:
+            main.plugin._configure(bad, settings([{"deviceId": LAMP}], fixedAddresses=[LAMP + " 300.1.1.1"]))
+        self.assertEqual(caught.exception.errors[0]["field"], "/fixedAddresses/0")
+
     def test_layout_and_output_names(self):
         c = self.make(settings([{"name": "Lamp", "deviceId": LAMP},
                                 {"name": "Strip", "deviceId": STRIP, "mode": "segments", "segments": 2}]), 9)
@@ -309,6 +321,7 @@ class HomeAssistant(unittest.TestCase):
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
 
     def test_client(self):
         client = ha.Client(self.url, "good")
@@ -333,9 +346,9 @@ class HomeAssistant(unittest.TestCase):
         lan.shared_endpoint = lambda: fake
         try:
             c = main.GoveeController(main.plugin, "inst-ha", main.plugin._types[0][0], 3)
+            # no haEntity: the plugin matches the lamp to its Home Assistant light by Govee id
             c.config = main.plugin._configure(c, settings(
-                [{"deviceId": LAMP, "haEntity": "light.bedroom_desk_lamp"}],
-                homeAssistant={"enabled": True, "url": self.url}))
+                [{"deviceId": LAMP}], homeAssistant={"enabled": True, "url": self.url}))
             c.running = True
             FakeHomeAssistant.calls.clear()
             c.start()
@@ -344,10 +357,10 @@ class HomeAssistant(unittest.TestCase):
             c.stop()
         finally:
             lan.shared_endpoint = shared
-        paths = [p for p, _ in FakeHomeAssistant.calls]
+        paths = [p for p, _ in FakeHomeAssistant.calls if p.startswith("/api/services")]
         self.assertEqual(paths, ["/api/services/script/light_acquire?return_response",
                                  "/api/services/script/light_release?return_response"])
-        self.assertEqual(FakeHomeAssistant.calls[1][1]["lights"], ["light.bedroom_desk_lamp"])
+        self.assertEqual(FakeHomeAssistant.calls[-1][1]["lights"], ["light.bedroom_desk_lamp"])
 
 
 if __name__ == "__main__":

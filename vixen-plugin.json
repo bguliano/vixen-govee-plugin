@@ -1,16 +1,26 @@
 {
   "id": "io.github.bguliano.govee-output",
   "name": "Govee Output",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "apiVersion": "^1.0",
   "description": "Drive Govee lights in a Vixen show over Govee's LAN API: one colour per bulb, or per segment on strips that support DreamView streaming. Optionally hands the lights to the show through a Home Assistant Light Arbiter.",
   "author": "Braden Guliano",
   "license": "MIT",
   "homepage": "https://github.com/bguliano/vixen-govee-plugin",
-  "entry": { "command": "python3", "args": ["main.py"] },
+  "entry": {
+    "command": "python3",
+    "args": [
+      "main.py"
+    ]
+  },
   "permissions": {
-    "network": ["udp:lan", "http:homeassistant.local:8123"],
-    "files": ["plugin-data"]
+    "network": [
+      "udp:lan",
+      "http:homeassistant.local:8123"
+    ],
+    "files": [
+      "plugin-data"
+    ]
   },
   "contributes": {
     "controllers": [
@@ -19,50 +29,204 @@
         "name": "Govee (LAN)",
         "configSchema": {
           "type": "object",
-          "x-order": ["devices", "brightness", "maxFps", "keepAliveMs", "gamma", "segmentBlend", "onStop", "homeAssistant"],
+          "x-order": [
+            "devices",
+            "brightness",
+            "maxFps",
+            "keepAliveMs",
+            "gamma",
+            "segmentBlend",
+            "onStop",
+            "fixedAddresses",
+            "homeAssistant"
+          ],
           "properties": {
             "devices": {
               "type": "array",
               "title": "Devices",
-              "description": "In output order: each device takes 3 outputs (R, G, B), or 3 per segment in Segments mode. Run Plugins ▸ Govee Output ▸ Suggest Devices to fill this in.",
+              "description": "In output order: 3 outputs (R, G, B) per device, or 3 per segment. Plugins ▸ Govee Output ▸ Suggest Devices lists yours.",
               "maxItems": 64,
               "default": [],
               "items": {
                 "type": "object",
-                "x-order": ["name", "deviceId", "mode", "segments", "reverse", "enabled", "ip", "haEntity"],
+                "x-order": [
+                  "name",
+                  "deviceId",
+                  "mode",
+                  "segments",
+                  "enabled"
+                ],
                 "properties": {
-                  "name": { "type": "string", "title": "Name", "maxLength": 80, "default": "" },
-                  "deviceId": { "type": "string", "title": "Govee device id", "description": "Eight bytes, like 1A:2B:3C:4D:5E:6F:70:81 (Discover lists them).", "minLength": 16, "maxLength": 32 },
-                  "mode": { "type": "string", "title": "Mode", "enum": ["color", "segments"], "x-enumNames": ["One colour", "Segments (DreamView)"], "default": "color" },
-                  "segments": { "type": "integer", "title": "Segments", "minimum": 1, "maximum": 255, "default": 1 },
-                  "reverse": { "type": "boolean", "title": "Reverse segments", "default": false },
-                  "enabled": { "type": "boolean", "title": "On", "default": true },
-                  "ip": { "type": "string", "title": "Fixed IP (optional)", "description": "Only if discovery can't reach it; otherwise found by id on every start.", "maxLength": 15, "default": "" },
-                  "haEntity": { "type": "string", "title": "Home Assistant light (optional)", "description": "The light entity the Light Arbiter knows it by.", "maxLength": 255, "default": "" }
+                  "name": {
+                    "type": "string",
+                    "title": "Name",
+                    "maxLength": 80,
+                    "default": "",
+                    "x-order": 1
+                  },
+                  "deviceId": {
+                    "type": "string",
+                    "title": "Govee device id",
+                    "minLength": 16,
+                    "maxLength": 32,
+                    "default": "",
+                    "x-order": 2
+                  },
+                  "mode": {
+                    "type": "string",
+                    "title": "Mode",
+                    "enum": [
+                      "color",
+                      "segments",
+                      "segmentsReversed"
+                    ],
+                    "x-enumNames": [
+                      "One colour",
+                      "Segments",
+                      "Segments, reversed"
+                    ],
+                    "default": "color",
+                    "x-order": 3
+                  },
+                  "segments": {
+                    "type": "integer",
+                    "title": "Segments",
+                    "minimum": 1,
+                    "maximum": 255,
+                    "default": 1,
+                    "x-order": 4
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "title": "On",
+                    "default": true,
+                    "x-order": 5
+                  }
                 },
-                "required": ["deviceId"],
-                "additionalProperties": false
-              }
+                "required": [
+                  "deviceId"
+                ]
+              },
+              "x-order": 1
             },
-            "brightness": { "type": "integer", "title": "Device brightness (%)", "description": "Set once when the show starts; the show's levels scale the colours under it.", "minimum": 1, "maximum": 100, "default": 100 },
-            "maxFps": { "type": "number", "title": "Updates per second per device", "description": "Govee devices drop commands sent too fast; 20 is safe for most.", "minimum": 1, "maximum": 40, "default": 20 },
-            "keepAliveMs": { "type": "integer", "title": "Resend unchanged colour every (ms)", "description": "Covers a lost UDP packet; 0 sends only on change.", "minimum": 0, "maximum": 10000, "default": 1000 },
-            "gamma": { "type": "number", "title": "Gamma", "description": "1 sends levels as they are; above 1 deepens dim levels.", "minimum": 0.5, "maximum": 3, "default": 1 },
-            "segmentBlend": { "type": "boolean", "title": "Blend between segments", "description": "The DreamView stream's gradient flag. Leave off for crisp segments.", "default": false },
-            "onStop": { "type": "string", "title": "When the show stops", "enum": ["restore", "leave"], "x-enumNames": ["Put each light back as it was", "Leave the last colour"], "default": "restore" },
+            "brightness": {
+              "type": "integer",
+              "title": "Device brightness (%)",
+              "description": "Set once when the show starts; the show's levels scale the colours under it.",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100,
+              "x-order": 2
+            },
+            "maxFps": {
+              "type": "number",
+              "title": "Updates per second per device",
+              "description": "Govee devices drop commands sent too fast; 20 is safe for most.",
+              "minimum": 1,
+              "maximum": 40,
+              "default": 20,
+              "x-order": 3
+            },
+            "keepAliveMs": {
+              "type": "integer",
+              "title": "Resend unchanged colour every (ms)",
+              "description": "Covers a lost UDP packet; 0 sends only on change.",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 1000,
+              "x-order": 4
+            },
+            "gamma": {
+              "type": "number",
+              "title": "Gamma",
+              "description": "1 sends levels as they are; above 1 deepens dim levels.",
+              "minimum": 0.5,
+              "maximum": 3,
+              "default": 1,
+              "x-order": 5
+            },
+            "segmentBlend": {
+              "type": "boolean",
+              "title": "Blend between segments",
+              "description": "The DreamView stream's gradient flag. Leave off for crisp segments.",
+              "default": false,
+              "x-order": 6
+            },
+            "onStop": {
+              "type": "string",
+              "title": "When the show stops",
+              "enum": [
+                "restore",
+                "leave"
+              ],
+              "x-enumNames": [
+                "Put each light back as it was",
+                "Leave the last colour"
+              ],
+              "default": "restore",
+              "x-order": 7
+            },
             "homeAssistant": {
               "type": "object",
               "title": "Home Assistant (Light Arbiter)",
-              "description": "Ask Home Assistant's light_acquire / light_release scripts for the lights, so automations don't fight the show. Needs a token in the plugin's data folder (see the README).",
-              "x-order": ["enabled", "url", "requester", "reason", "force"],
+              "description": "Ask Home Assistant's light_acquire / light_release scripts for the lights so automations don't fight the show. Lights are matched by Govee id. Needs a token (see the README).",
               "properties": {
-                "enabled": { "type": "boolean", "title": "Use the Light Arbiter", "default": false },
-                "url": { "type": "string", "title": "URL", "maxLength": 255, "default": "http://homeassistant.local:8123" },
-                "requester": { "type": "string", "title": "Request as", "enum": ["Script", "Effect", "Dashboard", "Voice", "Alexa", "Sunrise"], "default": "Script" },
-                "reason": { "type": "string", "title": "Reason shown on the dashboard", "maxLength": 100, "default": "Vixen show" },
-                "force": { "type": "boolean", "title": "Force", "description": "Take lights even when someone else holds them.", "default": false }
+                "enabled": {
+                  "type": "boolean",
+                  "title": "Use the Light Arbiter",
+                  "default": false,
+                  "x-order": 1
+                },
+                "url": {
+                  "type": "string",
+                  "title": "URL",
+                  "maxLength": 255,
+                  "default": "http://homeassistant.local:8123",
+                  "x-order": 2
+                },
+                "requester": {
+                  "type": "string",
+                  "title": "Request as",
+                  "enum": [
+                    "Script",
+                    "Effect",
+                    "Dashboard",
+                    "Voice",
+                    "Alexa",
+                    "Sunrise"
+                  ],
+                  "default": "Script",
+                  "x-order": 3
+                },
+                "reason": {
+                  "type": "string",
+                  "title": "Reason shown on the dashboard",
+                  "maxLength": 100,
+                  "default": "Vixen show",
+                  "x-order": 4
+                },
+                "force": {
+                  "type": "boolean",
+                  "title": "Force",
+                  "description": "Take lights even when someone else holds them.",
+                  "default": false,
+                  "x-order": 5
+                }
               },
-              "additionalProperties": false
+              "additionalProperties": false,
+              "x-order": 9
+            },
+            "fixedAddresses": {
+              "type": "array",
+              "title": "Fixed addresses (optional)",
+              "description": "Only for a light discovery can't find: its device id and IP, separated by a space.",
+              "maxItems": 64,
+              "default": [],
+              "items": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "x-order": 8
             }
           },
           "additionalProperties": false
@@ -71,22 +235,114 @@
         "maxOutputs": 3000,
         "dataPolicy": "highestWins8Bit",
         "outputNaming": "Govee {n}",
-        "frameEncodings": ["u8"]
+        "frameEncodings": [
+          "u8"
+        ]
       }
     ],
     "tools": [
-      { "name": "discover", "description": "Find Govee devices with LAN Control on, with their device ids and addresses (named from Home Assistant when a token is saved). Sends only a discovery broadcast; no light changes.", "inputSchema": { "type": "object", "properties": { "timeoutMs": { "type": "integer", "minimum": 500, "maximum": 10000 } }, "additionalProperties": false }, "readOnly": true },
-      { "name": "suggest_devices", "description": "A ready Devices table for a Govee controller covering every Govee light on the LAN, plus the outputs it needs. No light changes.", "inputSchema": { "type": "object", "properties": { "timeoutMs": { "type": "integer", "minimum": 500, "maximum": 10000 }, "segments": { "type": "boolean", "description": "Use Segments mode for strips that support it (default true)." } }, "additionalProperties": false }, "readOnly": true },
-      { "name": "status", "description": "Each Govee controller's devices: address, found or not, outputs, packets sent, and lights held through Home Assistant.", "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }, "readOnly": true },
-      { "name": "identify", "description": "Flash one real Govee light white three times, then put it back. Needs Live Output on.", "inputSchema": { "type": "object", "properties": { "deviceId": { "type": "string" } }, "required": ["deviceId"], "additionalProperties": false }, "readOnly": false },
-      { "name": "home_assistant_check", "description": "Check the Home Assistant URL and saved token work (no changes in Home Assistant).", "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "additionalProperties": false }, "readOnly": true }
+      {
+        "name": "discover",
+        "description": "Find Govee devices with LAN Control on, with their device ids and addresses (named from Home Assistant when a token is saved). Sends only a discovery broadcast; no light changes.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 500,
+              "maximum": 10000
+            }
+          },
+          "additionalProperties": false
+        },
+        "readOnly": true
+      },
+      {
+        "name": "suggest_devices",
+        "description": "A ready Devices table for a Govee controller covering every Govee light on the LAN, plus the outputs it needs. No light changes.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 500,
+              "maximum": 10000
+            },
+            "segments": {
+              "type": "boolean",
+              "description": "Use Segments mode for strips that support it (default true)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "readOnly": true
+      },
+      {
+        "name": "status",
+        "description": "Each Govee controller's devices: address, found or not, outputs, packets sent, and lights held through Home Assistant.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "readOnly": true
+      },
+      {
+        "name": "identify",
+        "description": "Flash one real Govee light white three times, then put it back. Needs Live Output on.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "deviceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "deviceId"
+          ],
+          "additionalProperties": false
+        },
+        "readOnly": false
+      },
+      {
+        "name": "home_assistant_check",
+        "description": "Check the Home Assistant URL and saved token work (no changes in Home Assistant).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "readOnly": true
+      }
     ],
     "commands": [
-      { "id": "discover", "title": "Discover Govee Devices…", "tool": "discover" },
-      { "id": "suggest_devices", "title": "Suggest Devices…", "tool": "suggest_devices" },
-      { "id": "status", "title": "Device Status", "tool": "status" },
-      { "id": "home_assistant_check", "title": "Check Home Assistant…", "tool": "home_assistant_check" }
+      {
+        "id": "discover",
+        "title": "Discover Govee Devices…",
+        "tool": "discover"
+      },
+      {
+        "id": "suggest_devices",
+        "title": "Suggest Devices…",
+        "tool": "suggest_devices"
+      },
+      {
+        "id": "status",
+        "title": "Device Status",
+        "tool": "status"
+      },
+      {
+        "id": "home_assistant_check",
+        "title": "Check Home Assistant…",
+        "tool": "home_assistant_check"
+      }
     ],
-    "events": ["liveOutput.changed"]
+    "events": [
+      "liveOutput.changed"
+    ]
   }
 }

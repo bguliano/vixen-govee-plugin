@@ -18,7 +18,7 @@ patch elements to it and Govee lights play in your show, over Govee's local LAN 
 - `python3` on the Mac (macOS's own, from the Command Line Tools, is fine; Python 3.9+, no packages needed).
 - **LAN Control** turned on for each light in the Govee Home app (device ▸ settings ▸ LAN Control).
 - The Mac running the show on the **same network** as the lights (not a guest network). Discovery uses multicast;
-  if your router blocks it, give a light a Fixed IP in its row.
+  if your router blocks it, list the light under Fixed addresses.
 
 ## Install
 
@@ -49,14 +49,15 @@ flash one light and find it in the room (needs Live Output on).
 
 | Setting | Default | |
 |---|---|---|
-| Devices | empty | Name, Govee device id, mode (*One colour* or *Segments*), segment count, reverse, on, fixed IP, Home Assistant light. |
+| Devices | empty | Name, Govee device id, mode (*One colour*, *Segments* or *Segments, reversed*), segment count, on. |
 | Device brightness | 100 % | Set once when the show starts; the show's levels scale the colours under it. |
 | Updates per second per device | 20 | Govee firmware drops commands sent too fast. Lower it if a light stutters. |
 | Resend unchanged colour every | 1000 ms | 0 sends only on change. |
 | Gamma | 1 | Above 1 deepens dim levels (LEDs look bright at low values). |
 | Blend between segments | off | DreamView's gradient flag. |
 | When the show stops | Put each light back | Or leave the last colour. |
-| Home Assistant | off | URL, requester (the Light Arbiter's list), reason, force. |
+| Fixed addresses | none | Only for a light discovery can't find: `<device id> <IP>` per entry. |
+| Home Assistant | off | URL, requester (the Light Arbiter's list), reason, force. Lights are matched to Home Assistant by Govee id. |
 
 ## Segments
 
@@ -77,8 +78,9 @@ For homes using the Light Arbiter scripts (`script.light_acquire` / `script.ligh
    mkdir -p "$D" && chmod 700 "$D" && read -rs "T?Home Assistant token: " && printf %s "$T" > "$D/ha-token" && chmod 600 "$D/ha-token"; unset T; echo
    ```
 
-3. In the controller's settings, turn on **Use the Light Arbiter**, set the URL (port 8123; the plugin's network
-   permission covers port 8123 only), and fill in each row's **Home Assistant light** (Suggest Devices does it).
+3. In the controller's settings, turn on **Use the Light Arbiter** and set the URL (port 8123; the plugin's network
+   permission covers port 8123 only). Each light is matched to its Home Assistant light by Govee id (govee2mqtt's
+   status sensors), so there's nothing to fill in per row.
 4. Plugins ▸ Govee Output ▸ **Check Home Assistant…** confirms the URL and token.
 
 Lights another requester holds are left alone (with a message) unless **Force** is on. If Home Assistant can't be

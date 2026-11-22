@@ -41,14 +41,16 @@ def _home_assistant(config):
 class Device:
     """One row of the Devices table and what the show last asked of it."""
 
-    def __init__(self, row, first_output):
+    def __init__(self, row, first_output, fixed=None):
         self.name = row.get("name") or row["deviceId"]
         self.device_id = lan.normalise_device_id(row["deviceId"])
-        self.configured_ip = row.get("ip") or None
+        # 0.1.0 rows carried ip, haEntity and reverse; they still work, but new settings keep the table narrow
+        self.configured_ip = (fixed or {}).get(self.device_id) or row.get("ip") or None
         self.ip = self.configured_ip
-        self.mode = row.get("mode", "color")
+        mode = row.get("mode", "color")
+        self.mode = "segments" if mode in ("segments", "segmentsReversed") else "color"
         self.segments = row.get("segments", 1) if self.mode == "segments" else 1
-        self.reverse = bool(row.get("reverse", False))
+        self.reverse = mode == "segmentsReversed" or bool(row.get("reverse", False))
         self.enabled = row.get("enabled", True)
         self.entity = row.get("haEntity") or None
         self.first_output = first_output
@@ -86,12 +88,27 @@ class Device:
         }
 
 
-def layout(devices_config):
+def fixed_addresses(entries):
+    """{device id: ip} from "1A:2B:… 192.168.1.20" entries, and the errors for entries that aren't."""
+    fixed, errors = {}, []
+    for i, entry in enumerate(entries or []):
+        parts = entry.split()
+        device_id = lan.normalise_device_id(parts[0]) if len(parts) == 2 else None
+        octets = parts[1].split(".") if device_id else []
+        if not (device_id and len(octets) == 4 and all(o.isdigit() and int(o) < 256 for o in octets)):
+            errors.append({"field": f"/fixedAddresses/{i}", "message": "must be a device id and an IPv4 address, "
+                                                                     "like 1A:2B:3C:4D:5E:6F:70:81 192.168.1.20"})
+        else:
+            fixed[device_id] = parts[1]
+    return fixed, errors
+
+
+def layout(devices_config, fixed=None):
     """Devices with their output ranges, in table order. Disabled devices keep their outputs, so turning one off
     never moves the patching of the ones after it."""
     devices, next_output = [], 0
     for row in devices_config:
-        device = Device(row, next_output)
+        device = Device(row, next_output, fixed)
         devices.append(device)
         next_output += device.output_count
     return devices, next_output
@@ -109,11 +126,13 @@ class GoveeController(vp.Controller):
             elif device_id in seen:
                 errors.append({"field": f"/devices/{i}/deviceId", "message": "is already in the table"})
             seen.add(device_id)
+        fixed, address_errors = fixed_addresses(config.get("fixedAddresses"))
+        errors += address_errors
         if errors:
             raise vp.ConfigError(errors)
         config = dict(config, devices=[dict(row, deviceId=lan.normalise_device_id(row["deviceId"]))
                                        for row in config["devices"]])
-        devices, needed = layout(config["devices"])
+        devices, needed = layout(config["devices"], fixed)
         if needed > self.output_count:
             raise vp.ConfigError(f"these devices need {needed} outputs and the controller has {self.output_count}: "
                                  f"set its outputs to {needed}", field="/devices")
@@ -296,6 +315,13 @@ class GoveeController(vp.Controller):
                                                           "the Light Arbiter.")
         if client is not None:
             arbiter = settings["homeAssistant"]
+            if any(d.entity is None for d in self.devices):
+                try:  # match lights to Home Assistant by Govee id (govee2mqtt's platform metadata)
+                    known = client.govee_devices()
+                    for device in self.devices:
+                        device.entity = device.entity or (known.get(device.device_id) or {}).get("entity")
+                except ha.HomeAssistantError as error:
+                    plugin.warn(f"couldn't match the lights to Home Assistant: {error}")
             lights = [d.entity for d in self.devices if d.enabled and d.found and d.entity]
             if lights:
                 try:
@@ -424,8 +450,8 @@ def suggest_devices(arguments):
         known = names.get(device_id) or {}
         segmented = known.get("segments") and arguments.get("segments", True)
         rows.append({"name": known.get("name") or f"{answer.get('sku')} {answer.get('ip')}", "deviceId": device_id,
-                     "ip": "", "mode": "segments" if segmented else "color", "segments": 15 if segmented else 1,
-                     "reverse": False, "enabled": True, "haEntity": known.get("entity") or ""})
+                     "mode": "segments" if segmented else "color", "segments": 15 if segmented else 1,
+                     "enabled": True})
     devices, outputs = layout(rows)
     return {"devices": rows, "outputsNeeded": outputs,
             "note": "Segment counts default to 15 (what govee2mqtt reports for most strips); check each strip with "
