@@ -2,7 +2,9 @@
 """Govee Output: Govee lights as a Vixen Studio controller, over Govee's LAN API.
 
 Each device in the controller's Devices table takes three outputs (R, G, B) for one colour, or three per segment when
-its mode is "segments" (the DreamView/razer stream, for strips that support it). Devices are found by their Govee
+its mode is "segments" (the DreamView/razer stream, for strips that support it). On Vixen Studio with plugin API 1.1 the
+controller's output count follows the table (outputs_for, named per light) and Detect Lights fills the table; on older
+Studio the user sets the count and configure refuses a table that needs more. Devices are found by their Govee
 device id on every start, so a new DHCP lease doesn't lose them. Optionally the plugin hands the lights to the show
 through a Home Assistant "Light Arbiter" (scripts light_acquire / light_release) and gives them back afterwards.
 """
@@ -103,6 +105,16 @@ def fixed_addresses(entries):
     return fixed, errors
 
 
+def output_names(devices):
+    """"Ceiling R", "Ceiling G", "Ceiling B" per light, "Strip S1 R" … per segment."""
+    names = []
+    for device in devices:
+        for s in range(device.segments):
+            label = device.name if device.segments == 1 else f"{device.name} S{s + 1}"
+            names += [f"{label} R", f"{label} G", f"{label} B"]
+    return names
+
+
 def layout(devices_config, fixed=None):
     """Devices with their output ranges, in table order. Disabled devices keep their outputs, so turning one off
     never moves the patching of the ones after it."""
@@ -116,6 +128,12 @@ def layout(devices_config, fixed=None):
 
 @plugin.controller()
 class GoveeController(vp.Controller):
+    @classmethod
+    def outputs_for(cls, config):
+        """The outputs the Devices table needs, named per light (Studio resizes the controller to match)."""
+        devices, _ = layout(config.get("devices") or [])
+        return output_names(devices)
+
     def configure(self, config):
         errors, seen = [], set()
         for i, row in enumerate(config["devices"]):
@@ -133,7 +151,8 @@ class GoveeController(vp.Controller):
         config = dict(config, devices=[dict(row, deviceId=lan.normalise_device_id(row["deviceId"]))
                                        for row in config["devices"]])
         devices, needed = layout(config["devices"], fixed)
-        if needed > self.output_count:
+        # A Studio with controllerOutputs resizes the controller to outputs_for itself; an older one needs the user to.
+        if needed > self.output_count and not plugin.host_sets_output_count:
             raise vp.ConfigError(f"these devices need {needed} outputs and the controller has {self.output_count}: "
                                  f"set its outputs to {needed}", field="/devices")
         with self._lock_obj():
@@ -168,16 +187,11 @@ class GoveeController(vp.Controller):
     def set_output_count(self, count):
         self.output_count = count
         needed = sum(d.output_count for d in getattr(self, "devices", []))
-        if needed > count:
+        if needed > count and not plugin.host_sets_output_count:
             self.status("error", f"the devices need {needed} outputs and the controller has {count}")
 
     def output_names(self):
-        names = []
-        for device in getattr(self, "devices", []):
-            for s in range(device.segments):
-                label = device.name if device.segments == 1 else f"{device.name} S{s + 1}"
-                names += [f"{label} R", f"{label} G", f"{label} B"]
-        return names
+        return output_names(getattr(self, "devices", []))
 
     # ---- Live output ----------------------------------------------------------------------------------------------
 
@@ -448,14 +462,85 @@ def suggest_devices(arguments):
     rows = []
     for device_id, answer in sorted(found.items(), key=lambda kv: (names.get(kv[0], {}).get("name") or kv[1]["sku"])):
         known = names.get(device_id) or {}
-        segmented = known.get("segments") and arguments.get("segments", True)
-        rows.append({"name": known.get("name") or f"{answer.get('sku')} {answer.get('ip')}", "deviceId": device_id,
-                     "mode": "segments" if segmented else "color", "segments": 15 if segmented else 1,
-                     "enabled": True})
+        rows.append(detected_row(device_id, answer, known, arguments.get("segments", True)))
     devices, outputs = layout(rows)
     return {"devices": rows, "outputsNeeded": outputs,
-            "note": "Segment counts default to 15 (what govee2mqtt reports for most strips); check each strip with "
-                    "a test pattern and adjust. Set the controller's outputs to outputsNeeded before pasting."}
+            "note": "Segment counts come from Home Assistant (15 when it doesn't say); check each strip with a test "
+                    "pattern and adjust. Vixen Studio alpha 5 and later size the controller for you; on older ones set "
+                    "its outputs to outputsNeeded before pasting. Detect Lights in the controller inspector does this "
+                    "in one step."}
+
+
+def detected_row(device_id, answer, known, segments=True):
+    """A Devices row for a light discovery found: Segments with its real count for strips Home Assistant says can do
+    per-segment colour, One colour otherwise (bulbs, lamps)."""
+    count = known.get("segments") or 0
+    count = 15 if count is True else int(count)
+    segmented = count > 1 and segments
+    return {"name": known.get("name") or f"{answer.get('sku')} {answer.get('ip')}", "deviceId": device_id,
+            "mode": "segments" if segmented else "color", "segments": count if segmented else 1, "enabled": True}
+
+
+def merge_detected(rows, found, names):
+    """The Devices table after a scan: rows already there keep their place and settings (a name is filled in when
+    empty; a Segments row still at 1 segment gets the real count), and lights not in the table are added at the end.
+    Returns (rows, added names, updated names, missing names)."""
+    rows = [dict(row) for row in rows]
+    seen = {}
+    for row in rows:
+        seen[lan.normalise_device_id(row.get("deviceId", "")) or row.get("deviceId")] = row
+    added, updated = [], []
+    order = sorted(found.items(), key=lambda kv: ((names.get(kv[0]) or {}).get("name") or kv[1].get("sku") or "", kv[0]))
+    for device_id, answer in order:
+        known = names.get(device_id) or {}
+        fresh = detected_row(device_id, answer, known)
+        row = seen.get(device_id)
+        if row is None:
+            rows.append(fresh)
+            added.append(fresh["name"])
+            continue
+        changed = False
+        if not row.get("name"):
+            row["name"] = fresh["name"]
+            changed = True
+        if row.get("mode") in ("segments", "segmentsReversed") and row.get("segments", 1) == 1 and fresh["segments"] > 1:
+            row["segments"] = fresh["segments"]
+            changed = True
+        if changed:
+            updated.append(row["name"])
+    missing = [row.get("name") or row.get("deviceId") for key, row in seen.items()
+               if key not in found and row.get("enabled", True)]
+    return rows, added, updated, missing
+
+
+def _listing(names, limit=4):
+    shown = ", ".join(names[:limit])
+    return shown + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+@plugin.tool("detect_lights")
+def detect_lights(arguments):
+    """The controller inspector's Detect Lights: scans the LAN and answers the Devices table with every light added."""
+    arguments = arguments or {}
+    config = arguments.get("config") or {}
+    found = _endpoint().scan(timeout=arguments.get("timeoutMs", 2500) / 1000.0)
+    if not found:
+        return {"message": "No Govee light answered on the network. Turn on LAN Control for each light in the Govee "
+                           "Home app, and check this Mac is on the same network (not a guest network)."}
+    names = _names_from_home_assistant(config)
+    rows, added, updated, missing = merge_detected(config.get("devices") or [], found, names)
+    parts = [f"Found {len(found)} light{'s' if len(found) != 1 else ''}"]
+    parts.append(f"added {_listing(added)}" if added else "all already in the table")
+    if updated:
+        parts.append(f"updated {_listing(updated)}")
+    message = "; ".join(parts) + "."
+    if missing:
+        message += f" Not answering: {_listing(missing)}."
+    if not names:
+        message += " Names and segment counts come from Home Assistant once its token is saved (see the README)."
+    if not (added or updated):
+        return {"message": message}
+    return {"mergePatch": {"devices": rows}, "message": message}
 
 
 @plugin.tool("status")

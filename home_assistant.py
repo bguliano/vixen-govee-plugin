@@ -90,7 +90,26 @@ class Client:
             name = (attrs.get("friendly_name") or "").removesuffix(" Status").strip()
             entity = next((eid for eid, light in lights.items()
                            if (light.get("attributes") or {}).get("friendly_name") == name), None)
+            capabilities = meta.get("capabilities") or []
             found[meta["device"].upper()] = {"name": name, "sku": meta.get("sku"), "entity": entity,
-                                             "segments": "segmentedColorRgb" in
-                                             [c.get("instance") for c in meta.get("capabilities") or []]}
+                                             "segments": segment_count(capabilities)}
         return found
+
+
+def segment_count(capabilities):
+    """How many segments a device's segmentedColorRgb capability addresses (its "segment" field's element range), 0
+    without the capability. When the range isn't listed, 15: what govee2mqtt reports for most strips."""
+    for capability in capabilities:
+        if not isinstance(capability, dict) or capability.get("instance") != "segmentedColorRgb":
+            continue
+        fields = (capability.get("parameters") or {}).get("fields") or []
+        for field in fields:
+            if isinstance(field, dict) and field.get("fieldName") == "segment":
+                span = field.get("elementRange") or {}
+                if isinstance(span.get("max"), int) and isinstance(span.get("min"), int) and span["max"] >= span["min"]:
+                    return span["max"] - span["min"] + 1
+                options = field.get("options")
+                if isinstance(options, list) and options:
+                    return len(options)
+        return 15
+    return 0

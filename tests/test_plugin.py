@@ -365,3 +365,93 @@ class HomeAssistant(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+BULBS = ["0A:00:00:00:00:00:00:%02X" % i for i in range(1, 6)]
+
+
+class OutputCount(unittest.TestCase):
+    """0.2.0: Vixen Studio with plugin API 1.1 sizes the controller from outputs_for; older Studio still gets refusals."""
+
+    def setUp(self):
+        self.studio = Recorder()
+        self.studio.install(main.plugin)
+        main.plugin.capabilities = {}
+
+    def tearDown(self):
+        main.plugin.capabilities = {}
+
+    def outputs_for(self, config):
+        type_id = main.plugin._types[0][0]
+        return main.plugin._handle("controller.outputsFor", {"typeId": type_id, "config": config})
+
+    def test_five_bulbs_need_fifteen_outputs_named_per_light(self):
+        rows = [{"name": f"Bulb {i + 1}", "deviceId": d} for i, d in enumerate(BULBS)]
+        answer = self.outputs_for({"devices": rows})
+        self.assertEqual(answer["outputCount"], 15)
+        self.assertEqual(answer["outputNames"][:4], ["Bulb 1 R", "Bulb 1 G", "Bulb 1 B", "Bulb 2 R"])
+
+    def test_segments_and_disabled_rows_keep_their_outputs(self):
+        rows = [{"name": "Strip", "deviceId": STRIP, "mode": "segments", "segments": 2},
+                {"name": "Lamp", "deviceId": LAMP, "enabled": False}]
+        answer = self.outputs_for({"devices": rows})
+        self.assertEqual(answer["outputNames"], ["Strip S1 R", "Strip S1 G", "Strip S1 B", "Strip S2 R", "Strip S2 G",
+                                                 "Strip S2 B", "Lamp R", "Lamp G", "Lamp B"])
+        self.assertEqual(self.outputs_for({})["outputCount"], 0)
+
+    def test_the_manifest_declares_it_where_older_studio_ignores_it(self):
+        schema = main.plugin.manifest["contributes"]["controllers"][0]
+        self.assertNotIn("outputCount", schema)
+        self.assertEqual(schema["configSchema"]["x-outputCount"], "fromConfig")
+        self.assertEqual(schema["configSchema"]["x-actions"][0]["tool"], "detect_lights")
+        self.assertIn("detect_lights", main.plugin._tools)
+
+    def test_oversize_tables_are_refused_only_without_controller_outputs(self):
+        c = main.GoveeController(main.plugin, "inst-oc", main.plugin._types[0][0], 3)
+        config = settings([{"deviceId": LAMP}, {"deviceId": STRIP}])
+        with self.assertRaises(vp.ConfigError):
+            main.plugin._configure(c, config)
+        main.plugin._handle("initialize", {"capabilities": {"controllerOutputs": True}, "muted": True})
+        self.assertTrue(main.plugin.host_sets_output_count)
+        self.assertEqual(len(main.plugin._configure(c, config)["devices"]), 2)
+        main.controllers.pop("inst-oc", None)
+
+
+class Detection(unittest.TestCase):
+    def test_rows_are_added_and_existing_ones_keep_their_settings(self):
+        found = {LAMP: {"ip": "10.0.0.5", "sku": "H6008"}, STRIP: {"ip": "10.0.0.6", "sku": "H61E6"},
+                 BULBS[0]: {"ip": "10.0.0.7", "sku": "H6008"}}
+        names = {LAMP: {"name": "Desk Lamp", "segments": 0}, STRIP: {"name": "TV Strip", "segments": 12}}
+        existing = [{"name": "", "deviceId": LAMP, "mode": "color", "segments": 1, "enabled": False},
+                    {"name": "Gone", "deviceId": BULBS[4], "mode": "color", "segments": 1, "enabled": True}]
+        rows, added, updated, missing = main.merge_detected(existing, found, names)
+        self.assertEqual([r["deviceId"] for r in rows], [LAMP, BULBS[4], BULBS[0], STRIP])
+        self.assertEqual(rows[0], {"name": "Desk Lamp", "deviceId": LAMP, "mode": "color", "segments": 1, "enabled": False})
+        self.assertEqual(rows[3], {"name": "TV Strip", "deviceId": STRIP, "mode": "segments", "segments": 12, "enabled": True})
+        self.assertEqual(rows[2]["mode"], "color")
+        self.assertEqual((added, updated, missing), (["H6008 10.0.0.7", "TV Strip"], ["Desk Lamp"], ["Gone"]))
+
+    def test_detect_lights_answers_a_merge_patch(self):
+        fake = FakeLan({LAMP: {"ip": "10.0.0.5", "sku": "H6008", "status": {}},
+                        STRIP: {"ip": "10.0.0.6", "sku": "H61E6", "status": {}}})
+        shared, names = lan.shared_endpoint, main._names_from_home_assistant
+        lan.shared_endpoint = lambda: fake
+        main._names_from_home_assistant = lambda config=None: {STRIP: {"name": "TV Strip", "segments": 15}}
+        try:
+            answer = main.detect_lights({"config": {"devices": [{"name": "Lamp", "deviceId": LAMP}]}})
+            self.assertEqual([r["deviceId"] for r in answer["mergePatch"]["devices"]], [LAMP, STRIP])
+            self.assertIn("added TV Strip", answer["message"])
+            again = main.detect_lights({"config": {"devices": answer["mergePatch"]["devices"]}})
+            self.assertNotIn("mergePatch", again)
+            self.assertIn("all already in the table", again["message"])
+            fake.devices.clear()
+            self.assertIn("No Govee light answered", main.detect_lights({})["message"])
+        finally:
+            lan.shared_endpoint, main._names_from_home_assistant = shared, names
+
+    def test_segment_counts_come_from_the_capability(self):
+        rgb = {"instance": "segmentedColorRgb",
+               "parameters": {"fields": [{"fieldName": "segment", "elementRange": {"min": 0, "max": 11}}]}}
+        self.assertEqual(ha.segment_count([{"instance": "colorRgb"}, rgb]), 12)
+        self.assertEqual(ha.segment_count([{"instance": "segmentedColorRgb"}]), 15)
+        self.assertEqual(ha.segment_count([{"instance": "colorRgb"}]), 0)

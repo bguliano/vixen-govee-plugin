@@ -14,7 +14,7 @@ patch elements to it and Govee lights play in your show, over Govee's local LAN 
 
 ## Requirements
 
-- Vixen Studio with the plugin system (plugin API 1.0).
+- Vixen Studio with the plugin system (plugin API 1.0; 1.1, from 3.13.4 alpha 5, adds Detect Lights and outputs that follow the table).
 - `python3` on the Mac (macOS's own, from the Command Line Tools, is fine; Python 3.9+, no packages needed).
 - **LAN Control** turned on for each light in the Govee Home app (device ▸ settings ▸ LAN Control).
 - The Mac running the show on the **same network** as the lights (not a guest network). Discovery uses multicast;
@@ -33,23 +33,29 @@ patch elements to it and Govee lights play in your show, over Govee's local LAN 
 ## Set up a controller
 
 1. In the show window's **Controllers** section, Add Controller ▸ Plugins ▸ **Govee (LAN)**.
-2. Plugins ▸ Govee Output ▸ **Suggest Devices…** finds every Govee light on the network and returns a ready Devices
-   table and the number of outputs it needs (names come from Home Assistant when it's set up below).
-   **Discover Govee Devices…** just lists what answers.
-3. Set the controller's outputs to that number, then fill in the **Devices** table in the inspector. Each row takes
-   3 outputs (R, G, B) in table order, or 3 per segment in *Segments* mode. Disabled rows keep their outputs, so
-   turning a light off never moves the patching after it.
+2. Press **Detect Lights** in the controller's inspector. It finds every Govee light on the network and adds it to
+   the **Devices** table: bulbs, lamps and downlights as *One colour*, strips that support it as *Segments* with their
+   segment count (names and segment counts come from Home Assistant once it's set up below). Rows already in the table
+   keep their settings, so it's safe to press again after adding a light. You can also fill in rows by hand.
+3. The controller's outputs follow the table: 3 outputs (R, G, B) per light, or 3 per segment in *Segments* mode,
+   named after each light (`Ceiling R`, `Ceiling G`, `Ceiling B`, `TV Strip S1 R`, …). Removing a row whose outputs are
+   patched asks first; Undo puts everything back. Disabled rows keep their outputs, so turning a light off never moves
+   the patching after it.
 4. Patch your elements (RGB colour handling) to the outputs, turn on Live Output and use the Test submenu.
 
-An agent connected to Studio's MCP server can do all of this: `plugin__govee_output__suggest_devices`, then
-`controller_create` / `controller_configure {config}` / `patch_elements`, then `plugin__govee_output__identify` to
-flash one light and find it in the room (needs Live Output on).
+**Vixen Studio before 3.13.4 alpha 5** has no Detect Lights button and doesn't size the controller: use Plugins ▸
+Govee Output ▸ **Suggest Devices…** for a ready table and the outputs it needs, set the controller's outputs to that
+number, then paste or fill in the table. **Discover Govee Devices…** just lists what answers.
+
+An agent connected to Studio's MCP server can do all of this: `controller_create`, then `controller_action
+{action: "detect"}` (or `plugin__govee_output__suggest_devices` and `controller_configure {config}`), `patch_elements`,
+then `plugin__govee_output__identify` to flash one light and find it in the room (needs Live Output on).
 
 ## Settings
 
 | Setting | Default | |
 |---|---|---|
-| Devices | empty | Name, Govee device id, mode (*One colour*, *Segments* or *Segments, reversed*), segment count, on. |
+| Devices | empty | Name, Govee device id, mode (*One colour*, *Segments* or *Segments, reversed*), segment count, on. Detect Lights fills it in. |
 | Device brightness | 100 % | Set once when the show starts; the show's levels scale the colours under it. |
 | Updates per second per device | 20 | Govee firmware drops commands sent too fast. Lower it if a light stutters. |
 | Resend unchanged colour every | 1000 ms | 0 sends only on change. |
@@ -63,8 +69,8 @@ flash one light and find it in the room (needs Live Output on).
 
 *Segments* mode streams one colour per segment over DreamView: arm, wait about a second, then frames. Not every
 model has it (strips that offer DreamView or "Razer"/"Sync" in the Govee app usually do), and the number of segments
-the stream addresses can differ from what the Govee app shows. Start with what Home Assistant reports (15 on the
-H61E6) and adjust with a moving-pixel test pattern. If a strip stays dark in Segments mode, switch it to *One colour*.
+the stream addresses can differ from what the Govee app shows. Detect Lights starts from what Home Assistant reports
+(15 on the H61E6) and you adjust with a moving-pixel test pattern. If a strip stays dark in Segments mode, switch it to *One colour*.
 
 ## Home Assistant Light Arbiter (optional)
 
