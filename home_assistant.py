@@ -92,8 +92,21 @@ class Client:
                            if (light.get("attributes") or {}).get("friendly_name") == name), None)
             capabilities = meta.get("capabilities") or []
             found[meta["device"].upper()] = {"name": name, "sku": meta.get("sku"), "entity": entity,
-                                             "segments": segment_count(capabilities)}
+                                             "segments": segment_count(capabilities),
+                                             "kelvin": kelvin_range(capabilities)}
         return found
+
+
+def kelvin_range(capabilities):
+    """(min, max) of a device's colorTemperatureK capability: it has a white mode. None without one."""
+    for capability in capabilities:
+        if isinstance(capability, dict) and capability.get("instance") == "colorTemperatureK":
+            span = (capability.get("parameters") or {}).get("range") or {}
+            lo, hi = span.get("min"), span.get("max")
+            if isinstance(lo, int) and isinstance(hi, int) and 0 < lo < hi:
+                return (lo, hi)
+            return (2000, 9000)
+    return None
 
 
 def segment_count(capabilities):

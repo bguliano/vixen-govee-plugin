@@ -424,10 +424,12 @@ class Detection(unittest.TestCase):
         names = {LAMP: {"name": "Desk Lamp", "segments": 0}, STRIP: {"name": "TV Strip", "segments": 12}}
         existing = [{"name": "", "deviceId": LAMP, "mode": "color", "segments": 1, "enabled": False},
                     {"name": "Gone", "deviceId": BULBS[4], "mode": "color", "segments": 1, "enabled": True}]
-        rows, added, updated, missing = main.merge_detected(existing, found, names)
+        rows, added, updated, missing, whites = main.merge_detected(existing, found, names)
         self.assertEqual([r["deviceId"] for r in rows], [LAMP, BULBS[4], BULBS[0], STRIP])
         self.assertEqual(rows[0], {"name": "Desk Lamp", "deviceId": LAMP, "mode": "color", "segments": 1, "enabled": False})
-        self.assertEqual(rows[3], {"name": "TV Strip", "deviceId": STRIP, "mode": "segments", "segments": 12, "enabled": True})
+        self.assertEqual(rows[3], {"name": "TV Strip", "deviceId": STRIP, "mode": "segments", "segments": 12,
+                                   "channels": "rgb", "enabled": True})
+        self.assertEqual(whites, [])
         self.assertEqual(rows[2]["mode"], "color")
         self.assertEqual((added, updated, missing), (["H6008 10.0.0.7", "TV Strip"], ["Desk Lamp"], ["Gone"]))
 
@@ -455,3 +457,122 @@ class Detection(unittest.TestCase):
         self.assertEqual(ha.segment_count([{"instance": "colorRgb"}, rgb]), 12)
         self.assertEqual(ha.segment_count([{"instance": "segmentedColorRgb"}]), 15)
         self.assertEqual(ha.segment_count([{"instance": "colorRgb"}]), 0)
+
+
+CEILING = ["0B:00:00:00:00:00:00:%02X" % i for i in range(1, 6)]
+WHITE_RANGE = {"kelvin": (2000, 9000)}
+
+
+class Rgbw(unittest.TestCase):
+    """0.3.0: bulbs with a white mode as RGBW lights. W leads: white mode at a temperature from the frame; else RGB."""
+
+    def test_white_leads_to_white_mode_at_the_frames_level(self):
+        self.assertEqual(main.rgbw_command(0, 0, 0, 255, 100), ("white", 6504, 100))
+        self.assertEqual(main.rgbw_command(0, 0, 0, 128, 100), ("white", 6504, 50), "a fade dims the bulb")
+        self.assertEqual(main.rgbw_command(0, 0, 0, 255, 60)[2], 60, "under the Device brightness setting")
+        self.assertEqual(main.rgbw_command(255, 0, 0, 0, 100), ("color", (255, 0, 0), 100))
+        self.assertEqual(main.rgbw_command(0, 0, 0, 0, 100), ("color", (0, 0, 0), 100), "off stays a black colour")
+        # A pastel mixes W into R, G and B in colour mode, at full brightness.
+        self.assertEqual(main.rgbw_command(200, 0, 100, 55, 100), ("color", (255, 55, 155), 100))
+        # Too dim for 1 % brightness: a dark colour instead of a 1 % white.
+        self.assertEqual(main.rgbw_command(0, 0, 0, 1, 100)[0], "color")
+
+    def test_the_tint_picks_the_temperature(self):
+        warm = main.rgbw_command(105, 50, 0, 150, 100)  # Vixen's RGBW breakdown of (255, 200, 150)
+        neutral = main.rgbw_command(0, 0, 0, 200, 100)
+        cool = main.rgbw_command(0, 20, 60, 195, 100)  # (195, 215, 255)
+        self.assertEqual([warm[0], neutral[0], cool[0]], ["white"] * 3)
+        self.assertLess(warm[1], 4000)
+        self.assertEqual(neutral[1], 6504, "sRGB white is D65")
+        self.assertGreater(cool[1], 9000 - 1, "clamped to the top of the range")
+        self.assertLess(main.kelvin_of(255, 140, 40), 2100, "deep amber is at the warm end")
+        self.assertEqual(main.kelvin_of(255, 128, 128), 2000, "clamped to the bottom of the range")
+        self.assertEqual(main.kelvin_of(200, 220, 255, (2700, 6500)), 6500, "the device's own range")
+        self.assertEqual(main.rgbw_command(0, 0, 0, 255, 100, (2700, 6000))[1], 6000)
+
+    def test_layout_names_and_lights(self):
+        rows = [{"name": f"Ceiling {i + 1}", "deviceId": d, "channels": "rgbw"} for i, d in enumerate(CEILING)]
+        devices, count = main.layout(rows)
+        self.assertEqual(count, 20)
+        self.assertEqual([(d.first_output, d.output_count) for d in devices][:2], [(0, 4), (4, 4)])
+        answer = main.GoveeController.outputs_for({"devices": rows})
+        self.assertEqual(answer["outputCount"], 20)
+        self.assertEqual(answer["outputNames"][:5], ["Ceiling 1 R", "Ceiling 1 G", "Ceiling 1 B", "Ceiling 1 W", "Ceiling 2 R"])
+        self.assertEqual(answer["lights"][0], {"name": "Ceiling 1", "outputCount": 4})
+        # 0.2.x rows (no channels) stay RGB; Segments ignore RGBW (the stream carries RGB).
+        mixed = [{"name": "Old", "deviceId": LAMP},
+                 {"name": "Strip", "deviceId": STRIP, "mode": "segments", "segments": 2, "channels": "rgbw"}]
+        answer = main.GoveeController.outputs_for({"devices": mixed})
+        self.assertEqual(answer["outputCount"], 9)
+        self.assertEqual([l["outputCount"] for l in answer["lights"]], [3, 3, 3])
+        self.assertEqual(answer["lights"][1]["name"], "Strip S1")
+
+    def test_detect_picks_rgbw_for_white_capable_lights(self):
+        found = {CEILING[0]: {"ip": "10.0.0.7", "sku": "H601C"}, STRIP: {"ip": "10.0.0.6", "sku": "H61E6"},
+                 LAMP: {"ip": "10.0.0.5", "sku": "H6008"}, BULBS[0]: {"ip": "10.0.0.8", "sku": "H6001"}}
+        names = {CEILING[0]: dict(WHITE_RANGE, name="Kitchen 1"), STRIP: dict(WHITE_RANGE, name="TV Strip", segments=15),
+                 LAMP: dict(WHITE_RANGE, name="Desk Lamp"), BULBS[0]: {"name": "Old Bulb", "kelvin": None}}
+        existing = [{"name": "Desk Lamp", "deviceId": LAMP, "mode": "color", "segments": 1, "enabled": True}]
+        rows, added, _, _, whites = main.merge_detected(existing, found, names)
+        channels = {r["name"]: r.get("channels") for r in rows}
+        self.assertEqual(channels, {"Desk Lamp": None, "Kitchen 1": "rgbw", "Old Bulb": "rgb", "TV Strip": "rgb"})
+        self.assertEqual(whites, ["Desk Lamp"], "an existing RGB row is pointed out, never changed")
+        fake = FakeLan({LAMP: {"ip": "10.0.0.5", "sku": "H6008", "status": {}}})
+        shared, lookup = lan.shared_endpoint, main._names_from_home_assistant
+        lan.shared_endpoint = lambda: fake
+        main._names_from_home_assistant = lambda config=None: {LAMP: dict(WHITE_RANGE, name="Desk Lamp")}
+        try:
+            answer = main.detect_lights({"config": {"devices": existing}})
+            self.assertIn("Desk Lamp has a white mode: set Channels to RGBW", answer["message"])
+        finally:
+            lan.shared_endpoint, main._names_from_home_assistant = shared, lookup
+
+    def test_white_capability_from_home_assistant(self):
+        cap = {"instance": "colorTemperatureK", "parameters": {"range": {"min": 2700, "max": 6500, "precision": 1}}}
+        self.assertEqual(ha.kelvin_range([{"instance": "colorRgb"}, cap]), (2700, 6500))
+        self.assertIsNone(ha.kelvin_range([{"instance": "colorRgb"}]))
+
+
+class RgbwShow(unittest.TestCase):
+    """An RGBW lamp against the fake LAN (Controller's fixtures, without re-running its tests)."""
+    setUp, tearDown, make = Controller.setUp, Controller.tearDown, Controller.make
+
+    def frame(self, c, values):
+        c.frame(vp.Frame({"encoding": "u8", "values": base64.b64encode(bytes(values)).decode()}))
+
+    def run_show(self, rows, frames, outputs, **extra):
+        c = self.make(settings(rows, **extra), outputs)
+        c.start()
+        deadline = time.time() + 3
+        while time.time() < deadline and not any(s["state"] == "running" for s in self.studio.of("controller.status")):
+            time.sleep(0.02)
+        for values in frames:
+            self.frame(c, values)
+            time.sleep(0.15)
+        c.running = False
+        c.stop()
+        return [m for m in self.lan.to("10.0.0.5")]
+
+    def test_white_frame_plays_white_mode_and_red_plays_rgb(self):
+        sent = self.run_show([{"name": "Lamp", "deviceId": LAMP, "channels": "rgbw"}],
+                             [[0, 0, 0, 255], [0, 0, 0, 128], [255, 0, 0, 0]], 4,
+                             keepAliveMs=0, maxFps=40, onStop="leave")
+        show = [m for m in sent if m["cmd"] in ("colorwc", "brightness")]
+        start = show.index({"cmd": "colorwc", "data": {"color": {"r": 0, "g": 0, "b": 0}, "colorTemInKelvin": 6504}})
+        self.assertEqual(show[start - 1], {"cmd": "brightness", "data": {"value": 100}}, "show start")
+        self.assertEqual(show[start + 1:start + 3], [
+            {"cmd": "brightness", "data": {"value": 50}},
+            {"cmd": "colorwc", "data": {"color": {"r": 0, "g": 0, "b": 0}, "colorTemInKelvin": 6504}}],
+            "a dimmer white lowers the brightness first")
+        self.assertEqual(show[start + 3:start + 5], [
+            {"cmd": "colorwc", "data": {"color": {"r": 255, "g": 0, "b": 0}, "colorTemInKelvin": 0}},
+            {"cmd": "brightness", "data": {"value": 100}}],
+            "colour plays in RGB at full brightness, colour first")
+
+    def test_keepalive_puts_the_brightness_back(self):
+        # Something else (Adaptive Lighting) dims the lamp mid-show: the keepalive resends the brightness with the colour.
+        sent = self.run_show([{"name": "Lamp", "deviceId": LAMP}], [[255, 255, 255]] * 4, 3,
+                             keepAliveMs=100, maxFps=40, onStop="leave")
+        keepalives = [i for i, m in enumerate(sent) if m["cmd"] == "colorwc"][1:]
+        self.assertTrue(keepalives)
+        self.assertTrue(all(sent[i + 1] == {"cmd": "brightness", "data": {"value": 100}} for i in keepalives[:-1]))

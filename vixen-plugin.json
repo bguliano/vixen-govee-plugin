@@ -1,9 +1,9 @@
 {
   "id": "io.github.bguliano.govee-output",
   "name": "Govee Output",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "apiVersion": "^1.0",
-  "description": "Drive Govee lights in a Vixen show over Govee's LAN API: one colour per bulb, or per segment on strips that support DreamView streaming. Optionally hands the lights to the show through a Home Assistant Light Arbiter.",
+  "description": "Drive Govee lights in a Vixen show over Govee's LAN API: one colour per bulb (RGB, or RGBW for bulbs with a white mode), or per segment on strips that support DreamView streaming. Optionally hands the lights to the show through a Home Assistant Light Arbiter.",
   "author": "Braden Guliano",
   "license": "MIT",
   "homepage": "https://github.com/bguliano/vixen-govee-plugin",
@@ -35,7 +35,7 @@
               "id": "detect",
               "title": "Detect Lights",
               "tool": "detect_lights",
-              "description": "Find the Govee lights on your network and add any not in the table: bulbs as One colour, strips that support it as Segments with their segment count (names and counts come from Home Assistant when it's set up). Rows already there keep their settings."
+              "description": "Find the Govee lights on your network and add any not in the table: bulbs as One colour (RGBW when they have a white mode), strips that support it as Segments with their segment count (names, counts and white modes come from Home Assistant when it's set up). Rows already there keep their settings."
             }
           ],
           "x-order": [
@@ -53,7 +53,7 @@
             "devices": {
               "type": "array",
               "title": "Devices",
-              "description": "In output order: 3 outputs (R, G, B) per light, or 3 per segment. Detect Lights fills it in; the controller's outputs follow it (on Vixen Studio before alpha 5, set them to the number Suggest Devices gives).",
+              "description": "In output order: 3 outputs (R, G, B) per light, 4 (R, G, B, W) for RGBW, or 3 per segment. Detect Lights fills it in; the controller's outputs follow it (on Vixen Studio before alpha 5, set them to the number Suggest Devices gives).",
               "maxItems": 64,
               "default": [],
               "items": {
@@ -62,6 +62,7 @@
                   "name",
                   "deviceId",
                   "mode",
+                  "channels",
                   "segments",
                   "enabled"
                 ],
@@ -97,19 +98,34 @@
                     "default": "color",
                     "x-order": 3
                   },
+                  "channels": {
+                    "type": "string",
+                    "title": "Channels",
+                    "description": "RGBW for bulbs with a white mode (One colour only): W plays in the bulb's much brighter white mode, at a colour temperature from the frame's tint; colour plays in RGB.",
+                    "enum": [
+                      "rgb",
+                      "rgbw"
+                    ],
+                    "x-enumNames": [
+                      "RGB",
+                      "RGBW (white mode)"
+                    ],
+                    "default": "rgb",
+                    "x-order": 4
+                  },
                   "segments": {
                     "type": "integer",
                     "title": "Segments",
                     "minimum": 1,
                     "maximum": 255,
                     "default": 1,
-                    "x-order": 4
+                    "x-order": 5
                   },
                   "enabled": {
                     "type": "boolean",
                     "title": "On",
                     "default": true,
-                    "x-order": 5
+                    "x-order": 6
                   }
                 },
                 "required": [
@@ -288,7 +304,7 @@
       },
       {
         "name": "detect_lights",
-        "description": "The controller inspector's Detect Lights: scan the LAN and answer the controller's Devices table with every Govee light added (bulbs One colour, segmented strips with their segment count), as {mergePatch, message}. Pass the controller's current config to keep its rows. No light changes.",
+        "description": "The controller inspector's Detect Lights: scan the LAN and answer the controller's Devices table with every Govee light added (bulbs One colour, RGBW when they have a white mode; segmented strips with their segment count), as {mergePatch, message}. Pass the controller's current config to keep its rows. No light changes.",
         "inputSchema": {
           "type": "object",
           "properties": {

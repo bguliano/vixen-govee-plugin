@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Govee Output: Govee lights as a Vixen Studio controller, over Govee's LAN API.
 
-Each device in the controller's Devices table takes three outputs (R, G, B) for one colour, or three per segment when
-its mode is "segments" (the DreamView/razer stream, for strips that support it). On Vixen Studio with plugin API 1.1 the
+Each device in the controller's Devices table takes three outputs (R, G, B) for one colour, four (R, G, B, W) when its
+Channels are RGBW (bulbs with a white mode), or three per segment when its mode is "segments" (the DreamView/razer
+stream, for strips that support it). An RGBW light plays one mode at a time: white mode at a colour temperature worked
+out from the frame when W leads, colour otherwise (see rgbw_command). On Vixen Studio with plugin API 1.1 the
 controller's output count follows the table (outputs_for, named per light) and Detect Lights fills the table; on older
 Studio the user sets the count and configure refuses a table that needs more. Devices are found by their Govee
 device id on every start, so a new DHCP lease doesn't lose them. Optionally the plugin hands the lights to the show
@@ -20,6 +22,44 @@ controllers = {}  # instance id -> GoveeController, for the tools
 
 RESCAN_SECONDS = 30.0
 REARM_SECONDS = 30.0
+KELVIN_RANGE = (2000, 9000)  # Govee's white range for its colour-temperature bulbs, lamps and downlights
+
+
+def _linear(v):
+    v /= 255.0
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def kelvin_of(r, g, b, kelvin_range=KELVIN_RANGE):
+    """The colour temperature of an sRGB colour near white (McCamy's approximation from its CIE xy), clamped to the device's
+    range: plain white is 6500 K, an amber tint warmer, a blue tint cooler."""
+    lo, hi = kelvin_range
+    rl, gl, bl = _linear(r), _linear(g), _linear(b)
+    x = 0.4124 * rl + 0.3576 * gl + 0.1805 * bl
+    y = 0.2126 * rl + 0.7152 * gl + 0.0722 * bl
+    z = 0.0193 * rl + 0.1192 * gl + 0.9505 * bl
+    total = x + y + z
+    if total <= 0:
+        return 6500 if lo <= 6500 <= hi else lo
+    cx, cy = x / total, y / total
+    if cy <= 0.1858:  # at or below McCamy's epicentre: deep blue or violet, nowhere near white
+        return hi
+    n = (cx - 0.3320) / (0.1858 - cy)
+    kelvin = 449 * n ** 3 + 3525 * n ** 2 + 6823.3 * n + 5520.33
+    return int(round(max(lo, min(hi, kelvin))))
+
+
+def rgbw_command(r, g, b, w, brightness, kelvin_range=KELVIN_RANGE):
+    """What an RGBW light shows for one frame: ("white", kelvin, device brightness %) when W leads (W >= max(R, G, B)), or
+    ("color", (r, g, b), brightness) with W mixed into R, G and B. The bulbs run one mode at a time; white mode is much
+    brighter than RGB-mixed white. The frame's whole colour (W plus any tint) picks the temperature, and its level scales
+    the device brightness, so a white fade dims the bulb instead of mixing a dim grey."""
+    mixed = (min(255, r + w), min(255, g + w), min(255, b + w))
+    if w > 0 and w >= max(r, g, b):
+        percent = round(brightness * max(mixed) / 255)
+        if percent >= 1:
+            return "white", kelvin_of(*mixed, kelvin_range=kelvin_range), percent
+    return "color", mixed, brightness
 
 
 def _endpoint():
@@ -53,10 +93,14 @@ class Device:
         self.mode = "segments" if mode in ("segments", "segmentsReversed") else "color"
         self.segments = row.get("segments", 1) if self.mode == "segments" else 1
         self.reverse = mode == "segmentsReversed" or bool(row.get("reverse", False))
+        # RGBW only for One colour: the segment stream carries RGB. 0.2.x rows have no channels and stay RGB.
+        self.channels = "rgbw" if row.get("channels") == "rgbw" and self.mode == "color" else "rgb"
+        self.per_light = 4 if self.channels == "rgbw" else 3
+        self.kelvin_range = KELVIN_RANGE
         self.enabled = row.get("enabled", True)
         self.entity = row.get("haEntity") or None
         self.first_output = first_output
-        self.output_count = 3 * self.segments
+        self.output_count = self.per_light * self.segments
         self.reset()
 
     def reset(self):
@@ -69,22 +113,35 @@ class Device:
         self.prior = None  # devStatus captured at start, for restore
         self.skipped = None  # why the show doesn't drive it (arbiter refused), or None
         self.sends = 0
+        self.brightness = None  # the device brightness last sent, None until the show sets it
 
     def colors_from(self, values, gamma_table):
         chunk = values[self.first_output:self.first_output + self.output_count]
         chunk = list(chunk) + [0] * (self.output_count - len(chunk))
-        colors = [tuple(gamma_table[v & 0xFF] for v in chunk[i:i + 3]) for i in range(0, self.output_count, 3)]
+        per = self.per_light
+        colors = [tuple(gamma_table[v & 0xFF] for v in chunk[i:i + per]) for i in range(0, self.output_count, per)]
         return colors[::-1] if self.reverse else colors
 
-    def packet(self, colors, blend):
+    def packets(self, colors, blend, brightness, refresh=False):
+        """The packets that show `colors`, in sending order, and the device brightness they leave. One-colour lights
+        also get the brightness when it changes, or with `refresh` (the keepalive), so a light something else dimmed
+        mid-show (Adaptive Lighting, the Govee app) comes back."""
         if self.mode == "segments":
-            return lan.razer_colors_message(colors, gradient=blend)
-        return lan.color_message(*colors[0])
+            return [lan.razer_colors_message(colors, gradient=blend)], self.brightness
+        if self.channels == "rgbw":
+            kind, value, level = rgbw_command(*colors[0], brightness, self.kelvin_range)
+        else:
+            kind, value, level = "color", colors[0], brightness
+        dim = [lan.brightness_message(level)] if refresh or level != self.brightness else []
+        if kind == "white":
+            # Brightness first, so a bright colour never flashes into full-brightness white on the way down.
+            return dim + [lan.kelvin_message(value)], level
+        return [lan.color_message(*value)] + dim, level
 
     def describe(self):
         return {
             "name": self.name, "deviceId": self.device_id, "ip": self.ip, "found": self.found, "mode": self.mode,
-            "segments": self.segments, "outputs": f"{self.first_output + 1}-{self.first_output + self.output_count}",
+            "channels": self.channels, "segments": self.segments, "brightness": self.brightness, "outputs": f"{self.first_output + 1}-{self.first_output + self.output_count}",
             "enabled": self.enabled, "haEntity": self.entity, "skipped": self.skipped, "packetsSent": self.sends,
             "lastSendAgeMs": None if not self.last_send else int((time.monotonic() - self.last_send) * 1000),
         }
@@ -105,14 +162,18 @@ def fixed_addresses(entries):
     return fixed, errors
 
 
-def output_names(devices):
-    """"Ceiling R", "Ceiling G", "Ceiling B" per light, "Strip S1 R" … per segment."""
-    names = []
+def lights(devices):
+    """(name, outputs) per light in output order: each device, or each segment of a strip ("Strip S1")."""
+    result = []
     for device in devices:
         for s in range(device.segments):
-            label = device.name if device.segments == 1 else f"{device.name} S{s + 1}"
-            names += [f"{label} R", f"{label} G", f"{label} B"]
-    return names
+            result.append((device.name if device.segments == 1 else f"{device.name} S{s + 1}", device.per_light))
+    return result
+
+
+def output_names(devices):
+    """"Ceiling R", "Ceiling G", "Ceiling B" (and "Ceiling W" for RGBW) per light, "Strip S1 R" … per segment."""
+    return [f"{name} {c}" for name, per in lights(devices) for c in "RGBW"[:per]]
 
 
 def layout(devices_config, fixed=None):
@@ -130,9 +191,10 @@ def layout(devices_config, fixed=None):
 class GoveeController(vp.Controller):
     @classmethod
     def outputs_for(cls, config):
-        """The outputs the Devices table needs, named per light (Studio resizes the controller to match)."""
+        """The outputs the Devices table needs, named per light, with the lights they drive (Studio resizes the controller
+        to match, and Single Bulbs makes one element per light: RGB for 3 outputs, RGBW for 4)."""
         devices, _ = layout(config.get("devices") or [])
-        return output_names(devices)
+        return vp.lights_outputs(lights(devices))
 
     def configure(self, config):
         errors, seen = [], set()
@@ -178,6 +240,7 @@ class GoveeController(vp.Controller):
             if previous is not None and self.running:
                 device.ip = device.configured_ip or previous.ip
                 device.found, device.prior, device.skipped = previous.found, previous.prior, previous.skipped
+                device.brightness, device.kelvin_range = previous.brightness, previous.kelvin_range
                 device.armed_at = previous.armed_at if device.mode == previous.mode == "segments" else None
         self.devices = devices
         gamma = float(self.settings.get("gamma", 1.0))
@@ -260,12 +323,14 @@ class GoveeController(vp.Controller):
                     changed = device.wanted != device.sent
                     due = device.last_send + (interval if changed else keepalive)
                     if (changed or keepalive > 0) and now >= due:
-                        packet = device.packet(device.wanted, settings.get("segmentBlend", False))
-                        endpoint.send(device.ip, packet)
-                        device.sent, device.last_send = device.wanted, now
+                        packets, level = device.packets(device.wanted, settings.get("segmentBlend", False),
+                                                        settings["brightness"], refresh=not changed)
+                        for packet in packets:
+                            endpoint.send(device.ip, packet)
+                            sent_packets += 1
+                            sent_bytes += len(packet)
+                        device.sent, device.last_send, device.brightness = device.wanted, now, level
                         device.sends += 1
-                        sent_packets += 1
-                        sent_bytes += len(packet)
                         due = now + interval
                     if changed or keepalive > 0:
                         next_due = min(next_due, max(due, now + 0.001))
@@ -334,6 +399,7 @@ class GoveeController(vp.Controller):
                     known = client.govee_devices()
                     for device in self.devices:
                         device.entity = device.entity or (known.get(device.device_id) or {}).get("entity")
+                        device.kelvin_range = (known.get(device.device_id) or {}).get("kelvin") or device.kelvin_range
                 except ha.HomeAssistantError as error:
                     plugin.warn(f"couldn't match the lights to Home Assistant: {error}")
             lights = [d.entity for d in self.devices if d.enabled and d.found and d.entity]
@@ -371,6 +437,7 @@ class GoveeController(vp.Controller):
                     endpoint.send(device.ip, lan.turn_message(True))
                 if not device.prior or device.prior.get("brightness") != brightness:
                     endpoint.send(device.ip, lan.brightness_message(brightness))
+                device.brightness = brightness
             except OSError as error:
                 plugin.warn(f"{device.name}: {error}")
 
@@ -473,23 +540,27 @@ def suggest_devices(arguments):
 
 def detected_row(device_id, answer, known, segments=True):
     """A Devices row for a light discovery found: Segments with its real count for strips Home Assistant says can do
-    per-segment colour, One colour otherwise (bulbs, lamps)."""
+    per-segment colour, One colour otherwise (bulbs, lamps); RGBW channels for one-colour lights with a white mode
+    (a colour temperature range in Home Assistant)."""
     count = known.get("segments") or 0
     count = 15 if count is True else int(count)
     segmented = count > 1 and segments
     return {"name": known.get("name") or f"{answer.get('sku')} {answer.get('ip')}", "deviceId": device_id,
-            "mode": "segments" if segmented else "color", "segments": count if segmented else 1, "enabled": True}
+            "mode": "segments" if segmented else "color", "segments": count if segmented else 1,
+            "channels": "rgbw" if known.get("kelvin") and not segmented else "rgb", "enabled": True}
 
 
 def merge_detected(rows, found, names):
     """The Devices table after a scan: rows already there keep their place and settings (a name is filled in when
     empty; a Segments row still at 1 segment gets the real count), and lights not in the table are added at the end.
-    Returns (rows, added names, updated names, missing names)."""
+    An existing row's Channels never change here (that would move every later light's outputs), but one-colour RGB
+    rows for lights with a white mode are listed so the user can switch them.
+    Returns (rows, added names, updated names, missing names, could-be-RGBW names)."""
     rows = [dict(row) for row in rows]
     seen = {}
     for row in rows:
         seen[lan.normalise_device_id(row.get("deviceId", "")) or row.get("deviceId")] = row
-    added, updated = [], []
+    added, updated, whites = [], [], []
     order = sorted(found.items(), key=lambda kv: ((names.get(kv[0]) or {}).get("name") or kv[1].get("sku") or "", kv[0]))
     for device_id, answer in order:
         known = names.get(device_id) or {}
@@ -508,9 +579,11 @@ def merge_detected(rows, found, names):
             changed = True
         if changed:
             updated.append(row["name"])
+        if fresh["channels"] == "rgbw" and row.get("mode", "color") == "color" and row.get("channels", "rgb") == "rgb":
+            whites.append(row.get("name") or device_id)
     missing = [row.get("name") or row.get("deviceId") for key, row in seen.items()
                if key not in found and row.get("enabled", True)]
-    return rows, added, updated, missing
+    return rows, added, updated, missing, whites
 
 
 def _listing(names, limit=4):
@@ -528,7 +601,7 @@ def detect_lights(arguments):
         return {"message": "No Govee light answered on the network. Turn on LAN Control for each light in the Govee "
                            "Home app, and check this Mac is on the same network (not a guest network)."}
     names = _names_from_home_assistant(config)
-    rows, added, updated, missing = merge_detected(config.get("devices") or [], found, names)
+    rows, added, updated, missing, whites = merge_detected(config.get("devices") or [], found, names)
     parts = [f"Found {len(found)} light{'s' if len(found) != 1 else ''}"]
     parts.append(f"added {_listing(added)}" if added else "all already in the table")
     if updated:
@@ -536,6 +609,9 @@ def detect_lights(arguments):
     message = "; ".join(parts) + "."
     if missing:
         message += f" Not answering: {_listing(missing)}."
+    if whites:
+        message += (f" {_listing(whites)} {'has' if len(whites) == 1 else 'have'} a white mode: set Channels to RGBW "
+                    "for a much brighter white (one more output per light).")
     if not names:
         message += " Names and segment counts come from Home Assistant once its token is saved (see the README)."
     if not (added or updated):
